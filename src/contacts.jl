@@ -1,3 +1,13 @@
+function forcebasis(μ::Float64, num_basis_vectors::Val{N}) where N
+    Δθ = 2 * π / N
+    μ = μ
+    basis_vectors = ntuple(num_basis_vectors) do i
+        θ = (i - 1) * Δθ
+        normalize(SVector(μ * cos(θ), μ * sin(θ), 1.0))
+    end
+    hcat(basis_vectors...)
+end
+
 struct ContactPoint
     position::Point3D{SVector{3, Float64}}
     normal::FreeVector3D{SVector{3, Float64}}
@@ -9,42 +19,32 @@ struct ContactPoint
             normal::FreeVector3D{SVector{3, Float64}},
             μ::Float64)
         @framecheck position.frame normal.frame
-        point_origin_normal_z = CartesianFrame3D()
+        contact_point_local_frame = CartesianFrame3D()
         z = SVector(0., 0., 1.)
         rot = Rotations.rotation_between(z, normal.v)
         # `localtransform`: transform from frame with:
         # * origin at `position`
         # * `normal` as z-axis
         # to frame in which `position` and `normal` are expressed:
-        localtransform = Transform3D(point_origin_normal_z, position.frame, rot, position.v)
+        localtransform = Transform3D(contact_point_local_frame, position.frame, rot, position.v)
         new(position, normal, μ, localtransform)
     end
-end
-
-function wrenchbasis(
-        point::ContactPoint,
-        num_basis_vectors::Val{N},
-        body_to_desired::Transform3D = eye(Transform3D{Float64}, point.localtransform.to)) where N
-    Δθ = 2 * π / N
-    μ = point.μ
-    basis_vectors = ntuple(num_basis_vectors) do i
-        θ = (i - 1) * Δθ
-        normalize(SVector(μ * cos(θ), μ * sin(θ), 1.0))
-    end
-    linear = hcat(basis_vectors...)
-    angular = zero(linear)
-    wrenchmatrix = WrenchMatrix(point.localtransform.from, angular, linear)
-    transform(wrenchmatrix, body_to_desired * point.localtransform)
 end
 
 mutable struct ContactConfiguration{N}
     point::ContactPoint
     ρ::SVector{N, Variable} # basis vector multipliers
+    f::SVector{3, Variable} # contact force expressed in contact-point-local frame
     weight::Float64
     maxnormalforce::Float64
 
-    function ContactConfiguration(point::ContactPoint, ρ::SVector{N, Variable}) where N
-        new{N}(point, ρ, 0.0, 0.0)
+    function ContactConfiguration{N}(point::ContactPoint, model::SimpleQP.Model) where N
+        ρ = SVector(ntuple(_ -> Variable(model)), Val(N))
+        f = SVector(ntuple(_ -> Variable(model)), Val(3))
+        ret = new{N}(point, ρ, f, 0.0, 0.0)
+        basis = Parameter(() -> forcebasis(ret.point.μ, Val(N)), model)
+        @constraint(model, f == basis * ρ)
+
     end
 end
 
