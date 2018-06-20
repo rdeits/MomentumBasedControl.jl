@@ -1,5 +1,11 @@
 # TODO: max normal force
 
+struct TeriminalStateTask{T}
+    x::Vector{T}
+    Q::SparseMatrixCSC{T, Int}
+    q::SparseVector{T, Int}
+end
+
 mutable struct MomentumBasedController
     # dynamics-related
     mechanism::Mechanism{Float64} # TODO: possibly remove
@@ -15,6 +21,7 @@ mutable struct MomentumBasedController
     spatialacceltasks::Vector{SpatialAccelerationTask}
     jointacceltasks::Vector{JointAccelerationTask}
     momentumratetask::MomentumRateTask
+    terminalstatetask::TeriminalStateTask{Float64}
 
     # qp-related
     ρ::Vector{Float64}
@@ -36,13 +43,15 @@ mutable struct MomentumBasedController
         spatialacceltasks = Vector{SpatialAccelerationTask}()
         jointacceltasks = Vector{JointAccelerationTask}()
         momentumratetask = MomentumRateTask(centroidalframe)
+        nx = num_positions(mechanism) + nv
+        terminalstatetask = TeriminalStateTask(zeros(nx), spzeros(nx, nx), spzeros(nx))
 
         # qp-related
         ρ = Vector{Float64}()
 
         new(
             mechanism, centroidalframe, totalmass, result, momentummatrix, wrenchmatrix,
-            externalwrenches, contactsettings, spatialacceltasks, jointacceltasks, momentumratetask,
+            externalwrenches, contactsettings, spatialacceltasks, jointacceltasks, momentumratetask, terminalstatetask,
             ρ)
     end
 end
@@ -97,7 +106,15 @@ function clear_desireds!(controller::MomentumBasedController)
     controller.momentumratetask = MomentumRateTask(controller.centroidalframe)
 end
 
-reset!(controller::MomentumBasedController) = (clear_contacts!(controller); clear_desireds!(controller))
+function clear_terminal!(controller::MomentumBasedController)
+    controller.terminalstatetask.x .= 0
+    controller.terminalstatetask.Q .= 0
+    dropzeros!(controller.terminalstatetask.Q)
+    controller.terminalstatetask.q .= 0
+    dropzeros!(controller.terminalstatetask.q)
+end
+
+reset!(controller::MomentumBasedController) = (clear_contacts!(controller); clear_desireds!(controller); clear_terminal!(controller))
 
 function regularize_joint_accels!(controller::MomentumBasedController, weight)
     for task in controller.jointacceltasks
@@ -272,6 +289,16 @@ function (controller::MomentumBasedController)(τ::AbstractVector, t::Number, st
         obj += settings.weight * dot(ρcontact, ρcontact)
     end
 
+    # TODO: how to handle dt? 
+    # TODO: handle qdot vs v correctly
+    dt = 0.01
+    vnext = velocity(state) + v̇ * dt
+    xnext = vcat(configuration(state) + vnext * dt, vnext)
+    dx = (xnext - controller.terminalstatetask.x)
+    obj += dx' * controller.terminalstatetask.Q * dx + controller.terminalstatetask.q' * dx
+
+    obj += 1e-3 * sum(v̇ .^2)
+    
     @objective(model, Min, obj)
 
     # Solve
